@@ -472,23 +472,22 @@ eee status";
     }
 
     #[test]
-    #[ignore = "reason"]
     fn cmd_compare_test() {
         const WD: i8 = -1;
         let mut cmd_buffer = [0; CMD_BUF_SIZE as usize];
         let mut word_buf = [WD; N_WORDS as usize];
 
         // Empty buffer
-        assert_eq!(cmd_compare(0, c"test", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(0, c"test", &cmd_buffer, &word_buf), 0);
 
         const GOOD_CONFIG_1: &CStr = c"ip 192.168.10.247";
         cmd_buffer[0..GOOD_CONFIG_1.to_bytes_with_nul().len()]
             .copy_from_slice(GOOD_CONFIG_1.to_bytes_with_nul());
 
-        word_buf = [
-            0, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
-        ];
-        assert_eq!(cmd_compare(0, c"ip", &cmd_buffer, &word_buf), 0);
+        word_buf = [0, 3, 17, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD];
+        assert_eq!(cmd_compare(0, c"ip", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(1, c"192.168.10.247", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(1, c"192.168.10.24", &cmd_buffer, &word_buf), 0);
     }
 
     #[test]
