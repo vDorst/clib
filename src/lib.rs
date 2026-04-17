@@ -1,4 +1,4 @@
-use std::usize;
+use std::{ffi::CStr, usize};
 
 pub fn port(data: [u8; 2]) -> u8 {
     let mut port = data[0] & 0xc0;
@@ -147,7 +147,7 @@ pub fn itoa_html(v: u8, out: &mut Vec<u8>) {
 pub fn byte_to_html(mut val: u8, out: &mut Vec<u8>) {
     let mut again: u8 = 2;
     loop {
-        val = (val >> 4) | (val << 4);
+        val = val.rotate_left(4);
         out.push(itohex(val));
         again -= 1;
         if again == 0 {
@@ -305,9 +305,256 @@ pub fn flash_find_mark(flash: &mut Flash<'_>, mark: &[u8], mut len: u16) -> u16 
     mpos
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ERR {
+    Ok,
+    TooManyArgs,
+    CmdTooLong,
+}
+
+const CMD_BUF_SIZE: u8 = 128;
+const N_WORDS: u8 = 16;
+
+fn cmd_tokenize(
+    cmd_buffer: &[u8; CMD_BUF_SIZE as usize],
+    cmd_words_b: &mut [i8; N_WORDS as usize],
+    err_status: &mut ERR,
+) -> u8 {
+    *err_status = ERR::Ok;
+    let mut line_ptr: u8 = 0;
+    let mut is_white: bool = true;
+    let mut word: u8 = 0;
+
+    let mut c;
+
+    cmd_words_b.iter_mut().for_each(|val| *val = -1);
+
+    loop {
+        c = cmd_buffer[line_ptr as usize];
+        if c == b'\0' {
+            cmd_words_b[word as usize] = line_ptr as i8;
+            return 0;
+        }
+
+        if line_ptr >= CMD_BUF_SIZE - 1 {
+            *err_status = ERR::CmdTooLong;
+            return 1;
+        }
+
+        if is_white && c != b' ' {
+            is_white = false;
+            cmd_words_b[word as usize] = line_ptr as i8;
+            word += 1;
+        } else if c == b' ' {
+            is_white = true;
+        }
+        line_ptr += 1;
+    }
+}
+
+fn cmd_compare(
+    start: u8,
+    text: &CStr,
+    cmd_buffer: &[u8; CMD_BUF_SIZE as usize],
+    cmd_words_b: &[i8; N_WORDS as usize],
+) -> u8 {
+    let cmd = text.to_bytes_with_nul();
+
+    if (start > 0) && (cmd_words_b[start as usize] <= 0) {
+        // nothing on this word -> no match
+        return 0;
+    }
+
+    let mut j = 0_i8;
+    let mut i = cmd_words_b[start as usize];
+    while i != cmd_words_b[start as usize + 1] {
+        if cmd_buffer[i as usize] == b' ' {
+            break;
+        }
+        i &= (CMD_BUF_SIZE - 1).cast_signed();
+        if cmd[j as usize] == 0 {
+            // end of command reached, but cmd_buffer has more characters, so no match
+            return 0;
+        }
+        let c = cmd[j as usize];
+        j += 1;
+        if cmd_buffer[i as usize] != c {
+            break;
+        }
+        i += 1;
+    }
+    // check next word reached and command fully matched
+    if ((i == cmd_words_b[start as usize + 1]) || (cmd_buffer[i as usize] == b' '))
+        && cmd[j as usize] == 0
+    {
+        return 1;
+    }
+    0
+}
+
+fn execute_config(buf: &[u8]) -> ERR {
+    let mut err_status = ERR::Ok;
+    let mut flash_reader = buf.chunks_exact(256);
+    let mut cmd_buffer: [u8; CMD_BUF_SIZE as usize] = [0; _];
+    let mut cmd_words_b: [i8; 16] = [0; _];
+
+    let mut cmd_idx: u8 = 0;
+    'lus: loop {
+        let Some(flashbuf) = flash_reader.next() else {
+            break;
+        };
+        let mut cfg_idx: u8 = 0;
+        let mut c;
+
+        loop {
+            if cmd_idx >= (CMD_BUF_SIZE - 1) {
+                cmd_buffer[usize::from(cmd_idx)] = b'\0';
+                println!("ERROR: Command too long: {cmd_buffer:02x?}");
+                err_status = ERR::CmdTooLong;
+                break 'lus;
+            }
+
+            c = flashbuf[usize::from(cmd_idx)];
+            println!("C {c:02x} cmd_idx: {cmd_idx}");
+            cfg_idx = cfg_idx.wrapping_add(1);
+
+            if c == 0 || c == b'\n' {
+                cmd_buffer[usize::from(cmd_idx)] = b'\0';
+                // if cmd_idx != 0 || cmd_tokenize(&cmd_buffer, &mut cmd_words_b, &mut err_status) == 0
+                // {
+                // }
+
+                if c == 0 {
+                    break 'lus;
+                }
+            }
+
+            cmd_buffer[usize::from(cmd_idx)] = c;
+            cmd_idx += 1;
+            if cfg_idx == 0 {
+                break;
+            }
+        }
+    }
+
+    err_status
+}
+
 #[cfg(test)]
 mod tests_flash {
+    use std::ffi::CStr;
+
     use super::*;
+
+    #[test]
+    fn test_config_read() {
+        let mut cmd_buffer = [0; 512];
+        assert_eq!(execute_config(&cmd_buffer), ERR::Ok);
+
+        for idx in &mut cmd_buffer[0..126] {
+            *idx = b'b';
+        }
+        assert_eq!(execute_config(&cmd_buffer), ERR::Ok);
+
+        for idx in &mut cmd_buffer[0..127] {
+            *idx = b'b';
+        }
+        assert_eq!(execute_config(&cmd_buffer), ERR::CmdTooLong);
+
+        const BAD_CONFIG: &CStr = c"ip 192.168.10.247
+gw 192.168.10.1
+netmask 255.255.255.0
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+eee status";
+        cmd_buffer[0..BAD_CONFIG.to_bytes_with_nul().len()]
+            .copy_from_slice(BAD_CONFIG.to_bytes_with_nul());
+        assert_eq!(execute_config(&cmd_buffer), ERR::CmdTooLong);
+    }
+
+    #[test]
+    #[ignore = "reason"]
+    fn cmd_compare_test() {
+        const WD: i8 = -1;
+        let mut cmd_buffer = [0; CMD_BUF_SIZE as usize];
+        let mut word_buf = [WD; N_WORDS as usize];
+
+        // Empty buffer
+        assert_eq!(cmd_compare(0, c"test", &cmd_buffer, &word_buf), 1);
+
+        const GOOD_CONFIG_1: &CStr = c"ip 192.168.10.247";
+        cmd_buffer[0..GOOD_CONFIG_1.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_1.to_bytes_with_nul());
+
+        word_buf = [
+            0, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
+        ];
+        assert_eq!(cmd_compare(0, c"ip", &cmd_buffer, &word_buf), 0);
+    }
+
+    #[test]
+    fn cmd_tokenize_test() {
+        const WD: i8 = -1;
+        let mut cmd_buffer = [0; CMD_BUF_SIZE as usize];
+        let mut word_buf = [WD; N_WORDS as usize];
+        let mut err_status: ERR = ERR::Ok;
+
+        // Empty buffer
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
+        assert_eq!(
+            word_buf,
+            [
+                0, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
+            ]
+        );
+
+        // Corrupted, only spaces
+        cmd_buffer.iter_mut().for_each(|val| *val = b' ');
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 1);
+        assert_eq!(err_status, ERR::CmdTooLong);
+        assert_eq!(
+            word_buf,
+            [
+                WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
+            ]
+        );
+
+        // Valid command
+        const GOOD_CONFIG_1: &CStr = c"ip 192.168.10.247";
+        cmd_buffer[0..GOOD_CONFIG_1.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_1.to_bytes_with_nul());
+
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
+        assert_eq!(
+            word_buf,
+            [0, 3, 17, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
+        );
+
+        // Valid command
+        const GOOD_CONFIG_2: &CStr = c"vlan 1 2t";
+        cmd_buffer[0..GOOD_CONFIG_2.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_2.to_bytes_with_nul());
+
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
+        assert_eq!(
+            word_buf,
+            [0, 5, 7, 9, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
+        );
+
+        // Valid command
+        const GOOD_CONFIG_3: &CStr = c"port";
+        cmd_buffer[0..GOOD_CONFIG_3.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_3.to_bytes_with_nul());
+
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
+        assert_eq!(
+            word_buf,
+            [0, 4, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
+        );
+    }
 
     #[test]
     #[ignore = "broken"]
