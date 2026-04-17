@@ -352,7 +352,7 @@ fn cmd_tokenize(
     }
 }
 
-fn cmd_compare(
+pub fn cmd_compare(
     start: u8,
     text: &CStr,
     cmd_buffer: &[u8; CMD_BUF_SIZE as usize],
@@ -360,39 +360,47 @@ fn cmd_compare(
 ) -> u8 {
     let cmd = text.to_bytes_with_nul();
 
-    if (start > 0) && (cmd_words_b[start as usize] <= 0) {
+    let mut buf_idx: i8 = cmd_words_b[start as usize];
+
+    if buf_idx < 0 {
         // nothing on this word -> no match
         return 0;
     }
 
-    let mut j = 0_i8;
-    let mut i = cmd_words_b[start as usize];
-    while i != cmd_words_b[start as usize + 1] {
-        if cmd_buffer[i as usize] == b' ' {
+    let mut cmd_idx = 0_usize;
+
+    let mut c;
+    let mut b;
+
+    loop {
+        c = cmd[cmd_idx];
+
+        // i &= (CMD_BUF_SIZE - 1).cast_signed();
+        println!("{buf_idx}");
+        b = cmd_buffer[buf_idx as usize];
+
+        // println!("j {j} i {i} c {c:02x} b {b:02x}");
+        if c == b'\0' {
+            if b == b'\0' || b == b' ' {
+                return 1;
+            }
             break;
         }
-        i &= (CMD_BUF_SIZE - 1).cast_signed();
-        if cmd[j as usize] == 0 {
-            // end of command reached, but cmd_buffer has more characters, so no match
-            return 0;
-        }
-        let c = cmd[j as usize];
-        j += 1;
-        if cmd_buffer[i as usize] != c {
+        if b != c {
             break;
         }
-        i += 1;
-    }
-    // check next word reached and command fully matched
-    if ((i == cmd_words_b[start as usize + 1]) || (cmd_buffer[i as usize] == b' '))
-        && cmd[j as usize] == 0
-    {
-        return 1;
+
+        cmd_idx += 1;
+        buf_idx += 1;
+
+        if buf_idx < 0 {
+            break;
+        }
     }
     0
 }
 
-fn execute_config(buf: &[u8]) -> ERR {
+pub fn execute_config(buf: &[u8]) -> ERR {
     let mut err_status = ERR::Ok;
     let mut flash_reader = buf.chunks_exact(256);
     let mut cmd_buffer: [u8; CMD_BUF_SIZE as usize] = [0; _];
@@ -420,9 +428,9 @@ fn execute_config(buf: &[u8]) -> ERR {
 
             if c == 0 || c == b'\n' {
                 cmd_buffer[usize::from(cmd_idx)] = b'\0';
-                // if cmd_idx != 0 || cmd_tokenize(&cmd_buffer, &mut cmd_words_b, &mut err_status) == 0
-                // {
-                // }
+                if cmd_idx != 0 || cmd_tokenize(&cmd_buffer, &mut cmd_words_b, &mut err_status) == 0
+                {
+                }
 
                 if c == 0 {
                     break 'lus;
@@ -488,6 +496,34 @@ eee status";
         assert_eq!(cmd_compare(0, c"ip", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(1, c"192.168.10.247", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(1, c"192.168.10.24", &cmd_buffer, &word_buf), 0);
+
+        const GOOD_CONFIG_2: &CStr =
+            c"long gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg test";
+        cmd_buffer[0..GOOD_CONFIG_2.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_2.to_bytes_with_nul());
+
+        assert_eq!(GOOD_CONFIG_2.to_bytes_with_nul().len(), 127);
+
+        word_buf = [
+            0, 5, 122, 126, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
+        ];
+        assert_eq!(cmd_compare(0, c"long", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(2, c"test", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(2, c"test long", &cmd_buffer, &word_buf), 0);
+
+        const GOOD_CONFIG_3: &CStr =
+            c"long ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg test";
+        cmd_buffer[0..GOOD_CONFIG_3.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_3.to_bytes_with_nul());
+
+        assert_eq!(GOOD_CONFIG_3.to_bytes_with_nul().len(), 128);
+
+        word_buf = [
+            0, 5, 123, 127, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
+        ];
+        assert_eq!(cmd_compare(0, c"long", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(2, c"test", &cmd_buffer, &word_buf), 1);
+        assert_eq!(cmd_compare(2, c"test long", &cmd_buffer, &word_buf), 0);
     }
 
     #[test]
@@ -552,6 +588,20 @@ eee status";
         assert_eq!(
             word_buf,
             [0, 4, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
+        );
+
+        // Valid Max size
+        const GOOD_CONFIG_4: &CStr =
+            c"long ggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg test";
+        cmd_buffer[0..GOOD_CONFIG_4.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_4.to_bytes_with_nul());
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
+        assert_eq!(
+            word_buf,
+            [
+                0, 5, 123, 127, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
+            ]
         );
     }
 
