@@ -315,9 +315,21 @@ pub enum ERR {
 const CMD_BUF_SIZE: u8 = 128;
 const N_WORDS: u8 = 16;
 
+#[derive(Debug, Default, PartialEq)]
+pub struct CmdArgs {
+    len: u8,
+    words: [u8; N_WORDS as usize],
+}
+
+impl CmdArgs {
+    pub fn as_slice(&self) -> &[u8] {
+        &self.words[0..usize::from(self.len)]
+    }
+}
+
 fn cmd_tokenize(
     cmd_buffer: &[u8; CMD_BUF_SIZE as usize],
-    cmd_words_b: &mut [i8; N_WORDS as usize],
+    cmd_words_b: &mut CmdArgs,
     err_status: &mut ERR,
 ) -> u8 {
     *err_status = ERR::Ok;
@@ -327,24 +339,28 @@ fn cmd_tokenize(
 
     let mut c;
 
-    cmd_words_b.iter_mut().for_each(|val| *val = -1);
-
     loop {
         c = cmd_buffer[line_ptr as usize];
         if c == b'\0' {
-            cmd_words_b[word as usize] = line_ptr as i8;
+            cmd_words_b.len = word;
             return 0;
         }
 
         if line_ptr >= CMD_BUF_SIZE - 1 {
+            cmd_words_b.len = 0;
             *err_status = ERR::CmdTooLong;
             return 1;
         }
 
         if is_white && c != b' ' {
             is_white = false;
-            cmd_words_b[word as usize] = line_ptr as i8;
+            cmd_words_b.words[word as usize] = line_ptr;
             word += 1;
+            if word >= (N_WORDS) {
+                cmd_words_b.len = 0;
+                *err_status = ERR::TooManyArgs;
+                return 1;
+            }
         } else if c == b' ' {
             is_white = true;
         }
@@ -404,7 +420,7 @@ pub fn execute_config(buf: &[u8]) -> ERR {
     let mut err_status = ERR::Ok;
     let mut flash_reader = buf.chunks_exact(256);
     let mut cmd_buffer: [u8; CMD_BUF_SIZE as usize] = [0; _];
-    let mut cmd_words_b: [i8; 16] = [0; _];
+    let mut cmd_words_b = CmdArgs::default();
 
     let mut cmd_idx: u8 = 0;
     'lus: loop {
@@ -528,31 +544,20 @@ eee status";
 
     #[test]
     fn cmd_tokenize_test() {
-        const WD: i8 = -1;
         let mut cmd_buffer = [0; CMD_BUF_SIZE as usize];
-        let mut word_buf = [WD; N_WORDS as usize];
+        let mut word_buf = CmdArgs::default();
         let mut err_status: ERR = ERR::Ok;
 
         // Empty buffer
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
         assert_eq!(err_status, ERR::Ok);
-        assert_eq!(
-            word_buf,
-            [
-                0, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
-            ]
-        );
+        assert_eq!(word_buf.as_slice(), &[]);
 
         // Corrupted, only spaces
         cmd_buffer.iter_mut().for_each(|val| *val = b' ');
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 1);
         assert_eq!(err_status, ERR::CmdTooLong);
-        assert_eq!(
-            word_buf,
-            [
-                WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
-            ]
-        );
+        assert_eq!(word_buf.as_slice(), &[]);
 
         // Valid command
         const GOOD_CONFIG_1: &CStr = c"ip 192.168.10.247";
@@ -561,10 +566,7 @@ eee status";
 
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
         assert_eq!(err_status, ERR::Ok);
-        assert_eq!(
-            word_buf,
-            [0, 3, 17, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
-        );
+        assert_eq!(word_buf.as_slice(), &[0, 3]);
 
         // Valid command
         const GOOD_CONFIG_2: &CStr = c"vlan 1 2t";
@@ -573,10 +575,7 @@ eee status";
 
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
         assert_eq!(err_status, ERR::Ok);
-        assert_eq!(
-            word_buf,
-            [0, 5, 7, 9, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
-        );
+        assert_eq!(word_buf.as_slice(), &[0, 5, 7]);
 
         // Valid command
         const GOOD_CONFIG_3: &CStr = c"port";
@@ -585,10 +584,7 @@ eee status";
 
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
         assert_eq!(err_status, ERR::Ok);
-        assert_eq!(
-            word_buf,
-            [0, 4, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD]
-        );
+        assert_eq!(word_buf.as_slice(), &[0]);
 
         // Valid Max size
         const GOOD_CONFIG_4: &CStr =
@@ -597,11 +593,25 @@ eee status";
             .copy_from_slice(GOOD_CONFIG_4.to_bytes_with_nul());
         assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
         assert_eq!(err_status, ERR::Ok);
+        assert_eq!(word_buf.as_slice(), &[0, 5, 123]);
+
+        // Too Many Words
+        const BAD_CONFIG_5: &CStr = c"1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7";
+        cmd_buffer[0..BAD_CONFIG_5.to_bytes_with_nul().len()]
+            .copy_from_slice(BAD_CONFIG_5.to_bytes_with_nul());
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 1);
+        assert_eq!(err_status, ERR::TooManyArgs);
+        assert_eq!(word_buf.as_slice(), &[]);
+
+        // Valid Max Words
+        const GOOD_CONFIG_6: &CStr = c"1 2 3 4 5 6 7 8 9 0 1 2 3 4 5";
+        cmd_buffer[0..GOOD_CONFIG_6.to_bytes_with_nul().len()]
+            .copy_from_slice(GOOD_CONFIG_6.to_bytes_with_nul());
+        assert_eq!(cmd_tokenize(&cmd_buffer, &mut word_buf, &mut err_status), 0);
+        assert_eq!(err_status, ERR::Ok);
         assert_eq!(
-            word_buf,
-            [
-                0, 5, 123, 127, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD
-            ]
+            word_buf.as_slice(),
+            &[0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28]
         );
     }
 
