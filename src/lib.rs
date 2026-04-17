@@ -325,6 +325,22 @@ impl CmdArgs {
     pub fn as_slice(&self) -> &[u8] {
         &self.words[0..usize::from(self.len)]
     }
+
+    pub fn from_slice(data: &[u8]) -> Option<Self> {
+        let Some(len) = u8::try_from(data.len()).ok() else {
+            return None;
+        };
+
+        if len > N_WORDS {
+            return None;
+        }
+
+        let mut ret = Self::default();
+        ret.len = len;
+        ret.words[0..usize::from(len)].copy_from_slice(data);
+
+        Some(ret)
+    }
 }
 
 fn cmd_tokenize(
@@ -372,16 +388,16 @@ pub fn cmd_compare(
     start: u8,
     text: &CStr,
     cmd_buffer: &[u8; CMD_BUF_SIZE as usize],
-    cmd_words_b: &[i8; N_WORDS as usize],
+    cmd_words_b: &CmdArgs,
 ) -> u8 {
     let cmd = text.to_bytes_with_nul();
 
-    let mut buf_idx: i8 = cmd_words_b[start as usize];
-
-    if buf_idx < 0 {
+    if cmd_words_b.len == 0 || start > cmd_words_b.len - 1 {
         // nothing on this word -> no match
         return 0;
     }
+
+    let mut buf_idx = cmd_words_b.words[start as usize];
 
     let mut cmd_idx = 0_usize;
 
@@ -409,7 +425,7 @@ pub fn cmd_compare(
         cmd_idx += 1;
         buf_idx += 1;
 
-        if buf_idx < 0 {
+        if buf_idx >= CMD_BUF_SIZE {
             break;
         }
     }
@@ -497,21 +513,22 @@ eee status";
 
     #[test]
     fn cmd_compare_test() {
-        const WD: i8 = -1;
         let mut cmd_buffer = [0; CMD_BUF_SIZE as usize];
-        let mut word_buf = [WD; N_WORDS as usize];
+        let mut word_buf = CmdArgs::default();
 
         // Empty buffer
         assert_eq!(cmd_compare(0, c"test", &cmd_buffer, &word_buf), 0);
+        assert_eq!(cmd_compare(255, c"fake", &cmd_buffer, &word_buf), 0);
 
         const GOOD_CONFIG_1: &CStr = c"ip 192.168.10.247";
         cmd_buffer[0..GOOD_CONFIG_1.to_bytes_with_nul().len()]
             .copy_from_slice(GOOD_CONFIG_1.to_bytes_with_nul());
 
-        word_buf = [0, 3, 17, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD];
+        word_buf = CmdArgs::from_slice(&[0, 3]).unwrap();
         assert_eq!(cmd_compare(0, c"ip", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(1, c"192.168.10.247", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(1, c"192.168.10.24", &cmd_buffer, &word_buf), 0);
+        assert_eq!(cmd_compare(2, c"fake", &cmd_buffer, &word_buf), 0);
 
         const GOOD_CONFIG_2: &CStr =
             c"long gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg test";
@@ -520,9 +537,7 @@ eee status";
 
         assert_eq!(GOOD_CONFIG_2.to_bytes_with_nul().len(), 127);
 
-        word_buf = [
-            0, 5, 122, 126, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
-        ];
+        word_buf = CmdArgs::from_slice(&[0, 5, 122]).unwrap();
         assert_eq!(cmd_compare(0, c"long", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(2, c"test", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(2, c"test long", &cmd_buffer, &word_buf), 0);
@@ -534,9 +549,7 @@ eee status";
 
         assert_eq!(GOOD_CONFIG_3.to_bytes_with_nul().len(), 128);
 
-        word_buf = [
-            0, 5, 123, 127, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD, WD,
-        ];
+        word_buf = CmdArgs::from_slice(&[0, 5, 123]).unwrap();
         assert_eq!(cmd_compare(0, c"long", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(2, c"test", &cmd_buffer, &word_buf), 1);
         assert_eq!(cmd_compare(2, c"test long", &cmd_buffer, &word_buf), 0);
