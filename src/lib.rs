@@ -12,6 +12,69 @@ pub fn port(data: [u8; 2]) -> u8 {
     port
 }
 
+pub fn is_url_word_x(buf: &[u8], inp: &[u8]) -> bool {
+    println!("start");
+    let mut i = 0;
+    let mut j = 0;
+
+    let mut d;
+    let mut c;
+
+    loop {
+        d = buf[i];
+        if d == 0 {
+            break;
+        }
+        c = inp[j];
+
+        if c == b'%' {
+            let mut v = 0;
+            for _ in 0..2 {
+                j += 1;
+                c = inp[j];
+                if c == b'\0' {
+                    return false;
+                }
+                v <<= 4;
+                v |= if c.wrapping_sub(b'0') < 10 {
+                    c - b'0'
+                } else if (c | 0x20).wrapping_sub(b'a') < 6 {
+                    (c | 0x20) - b'a' + 10
+                } else {
+                    return false;
+                };
+            }
+
+            c = v;
+        }
+
+        println!("LOOP d: {d:02x} c: {c:02x}");
+        if d != c {
+            return false;
+        }
+
+        j += 1;
+        i += 1;
+    }
+
+    c = inp[j];
+
+    if c != b' '
+        && c != b'\t'
+        && c != b'?'
+        && c != b':'
+        && c != b'='
+        && c != b'\n'
+        && c != b'\r'
+        && c != b'\0'
+    {
+        println!("HIER");
+        return false;
+    }
+
+    true
+}
+
 pub fn atoi_hex(mut idx: usize, cmd_buffer: &[u8], hex_value: &mut [u8; 4]) -> usize {
     let mut h_idx = 0;
     let mut val = 0_u8;
@@ -893,5 +956,58 @@ mod tests {
             println!("port: {port_num}, data: {data:02x?}");
             assert_eq!(port(data), port_num);
         }
+    }
+
+    #[test]
+    fn is_url_word_test() {
+        assert!(is_url_word_x(
+            c"test".to_bytes_with_nul(),
+            c"test".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"test!".to_bytes_with_nul(),
+            c"test%21".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"test0".to_bytes_with_nul(),
+            c"test%30".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"testJ".to_bytes_with_nul(),
+            c"test%4A".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"testj".to_bytes_with_nul(),
+            c"test%6A".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"testé".to_bytes_with_nul(),
+            c"test%C3%A9".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"testé".to_bytes_with_nul(),
+            c"test%c3%a9".to_bytes_with_nul()
+        ));
+
+        assert!(!is_url_word_x(
+            c"teste".to_bytes_with_nul(),
+            c"test%C".to_bytes_with_nul()
+        ));
+
+        assert!(!is_url_word_x(
+            c"teste".to_bytes_with_nul(),
+            c"test%zz".to_bytes_with_nul()
+        ));
+
+        assert!(is_url_word_x(
+            c"teste".to_bytes_with_nul(),
+            c"teste?".to_bytes_with_nul()
+        ));
     }
 }
